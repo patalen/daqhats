@@ -3,7 +3,7 @@ MINOR = 2
 SUB   = 0.0
 NAME = daqhats
 VERSION = $(MAJOR).$(MINOR).$(SUB)
-INSTALL_DIR = /usr/local/lib
+INSTALL_DIR = $(VIRTUAL_ENV)/lib
 BUILD_DIR = ./build
 
 CC = gcc 
@@ -34,12 +34,11 @@ $(BUILD_DIR)/%.o : %.c
 install:
 	@cd ../include; make install; cd ../lib
 	@install -D $(BUILD_DIR)/$(TARGET_LIB) $(INSTALL_DIR)
-	@ldconfig
 	@ln -frs $(INSTALL_DIR)/$(TARGET_LIB) $(INSTALL_DIR)/lib$(NAME).so
-
+	@ln -frs $(INSTALL_DIR)/$(TARGET_LIB) $(INSTALL_DIR)/lib$(NAME).so.$(MAJOR)
+	
 uninstall:
 	@rm -rf $(INSTALL_DIR)/lib$(NAME).so*
-	@ldconfig
 	@cd ../include; make uninstall; cd ../lib
 	@rm -rf build	
 
