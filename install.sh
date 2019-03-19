@@ -1,7 +1,7 @@
 #!/bin/bash
 
-if [ "$(id -u)" != "0" ]; then
-   echo "This script must be run as root, i.e 'sudo ./install.sh'" 1>&2
+if [ "$(id -u)" == "0" ]; then
+   echo "This script must NOT be run as root. It's for installing within a Python virtualenv." 1>&2
    exit 1
 fi
 
@@ -20,20 +20,6 @@ echo
 make -C tools all
 make -C tools install
 make -C tools clean
-
-echo
-
-# Build examples
-echo "Building examples"
-echo
-make -C examples/c all
-
-echo
-
-# Read HAT EEPROMs to /etc/mcc/hats
-echo "Reading DAQ HAT EEPROMs"
-echo
-daqhats_read_eeproms
 
 echo
 
@@ -70,16 +56,5 @@ if [ "$install_py2" == 1 ]; then
 fi
 
 echo
-
-# Check for I2C device enabled
-if [ $(raspi-config nonint get_i2c) -eq 1 ]; then
-   echo "Some MCC DAQ HATs require the I2C interface to be enabled."
-   echo -n "Would you like to enable the I2C interface now? [y/n] "
-   read input
-   if [ "$input" == "y" ]; then
-      raspi-config nonint do_i2c 0
-   fi
-   echo
-fi
 
 echo "Install complete"
