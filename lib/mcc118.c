@@ -371,7 +371,6 @@ static int _spi_transfer(uint8_t address, uint8_t command, void* tx_data,
     struct timespec current_time;
     uint32_t diff;
     bool got_reply;
-    bool resend;
     int lock_fd;
     int ret;
     uint8_t temp;
@@ -461,23 +460,14 @@ static int _spi_transfer(uint8_t address, uint8_t command, void* tx_data,
     // send the command
     clock_gettime(CLOCK_MONOTONIC, &start_time);
 
-    do
+    if ((ret = ioctl(dev->spi_fd, SPI_IOC_MESSAGE(1), &tr)) < 1)
     {
-        if ((ret = ioctl(dev->spi_fd, SPI_IOC_MESSAGE(1), &tr)) < 1)
-        {
-            _release_lock(lock_fd);
-            free(tx_buffer);
-            free(rx_buffer);
-            free(temp_buffer);
-            return RESULT_UNDEFINED;
-        }
-
-        resend = false;
-
-        clock_gettime(CLOCK_MONOTONIC, &current_time);
-        diff = _difftime_us(&start_time, &current_time);
-        timeout = (diff > reply_timeout_us);
-    } while (resend && !timeout);
+        _release_lock(lock_fd);
+        free(tx_buffer);
+        free(rx_buffer);
+        free(temp_buffer);
+        return RESULT_UNDEFINED;
+    }
 
     if (retry_us)
         usleep(retry_us);
@@ -720,7 +710,7 @@ static int _parse_factory_data(cJSON* root, struct mcc118FactoryData* data)
                 {
                     // Found the calibration date
                     strncpy(data->cal_date, calchild->valuestring, 
-                        CAL_DATE_SIZE);
+                        CAL_DATE_SIZE-1);
                     got_date = true;
                 }
                 else if (!strcmp(calchild->string, "slopes") &&
@@ -1086,7 +1076,7 @@ int mcc118_open(uint8_t address)
     _mcc118_lib_init();
 
     // validate the parameters
-    if ((address >= MAX_NUMBER_HATS))
+    if (address >= MAX_NUMBER_HATS)
     {
         return RESULT_BAD_PARAMETER;
     }
@@ -1107,7 +1097,7 @@ int mcc118_open(uint8_t address)
             }
             else
             {
-                return RESULT_BAD_PARAMETER;
+                return RESULT_INVALID_DEVICE;
             }
         }
         else
@@ -1141,12 +1131,24 @@ int mcc118_open(uint8_t address)
         {
             // convert the JSON custom data to parameters
             cJSON* root = cJSON_Parse(custom_data);
-            if (!_parse_factory_data(root, &dev->factory_data))
+            if (root == NULL)
             {
-                // invalid custom data, use default values
+                // error parsing the JSON data
                 _set_defaults(&dev->factory_data);
+                printf("Warning - address %d using factory EEPROM default "
+                    "values\n", address);
             }
-            cJSON_Delete(root);
+            else
+            {
+                if (!_parse_factory_data(root, &dev->factory_data))
+                {
+                    // invalid custom data, use default values
+                    _set_defaults(&dev->factory_data);
+                    printf("Warning - address %d using factory EEPROM default "
+                        "values\n", address);
+                }
+                cJSON_Delete(root);
+            }
 
             free(custom_data);
         }
@@ -1154,6 +1156,8 @@ int mcc118_open(uint8_t address)
         {
             // use default parameters, board probably has an empty EEPROM.
             _set_defaults(&dev->factory_data);
+            printf("Warning - address %d using factory EEPROM default "
+                "values\n", address);
         }
 
     }

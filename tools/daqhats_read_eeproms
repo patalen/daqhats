@@ -15,7 +15,7 @@ else
    dtoverlay i2c-gpio i2c_gpio_sda=0 i2c_gpio_scl=1
    rc=$?
    if [ $rc != 0 ]; then
-      echo "Loading of i2c-gpio dtoverlay failed. Do an rpi-update (and maybe apt-get update; apt-get upgrade)."
+      echo "Loading of i2c-gpio dtoverlay failed. Do an rpi-update (and maybe apt update; apt upgrade)."
       exit $rc
    fi
    if [ -e "/dev/i2c-3" ]; then
@@ -57,13 +57,13 @@ do
    if [ "$rc" -eq 0 ]; then
       # successs, read the entire eeprom
       printf "Found HAT at address %d\n" $index
-      if [ "$index" != "0" ]; then
+      #if [ "$index" != "0" ]; then
          if [ ! -e "/etc/mcc/hats" ]; then
             mkdir -p "/etc/mcc/hats"
          fi
          dd if=$devname/eeprom of=/etc/mcc/hats/eeprom_$index.bin status=none
          sync
-      fi
+      #fi
    fi
 
    # remove the device
