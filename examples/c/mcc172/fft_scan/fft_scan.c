@@ -170,6 +170,7 @@ int main(void)
     uint32_t samples_read_per_channel = 0;
     uint8_t synced;
     uint8_t clock_source;
+    uint8_t alias_mode;
     uint8_t iepe_enable;
 
     FILE* logfile;
@@ -224,14 +225,15 @@ int main(void)
     }
     
     // Set the ADC clock to the desired rate.
-    result = mcc172_a_in_clock_config_write(address, 0, scan_rate);
+    result = mcc172_a_in_clock_config_write(address, SOURCE_LOCAL, ALIAS_NORMAL,
+        scan_rate);
     STOP_ON_ERROR(result);
     
     // Wait for the ADCs to synchronize.
     do
     {
         result = mcc172_a_in_clock_config_read(address, &clock_source,
-            &actual_scan_rate, &synced);
+            &alias_mode, &actual_scan_rate, &synced);
         STOP_ON_ERROR(result);
         usleep(5000);
     } while (synced == 0);
@@ -268,6 +270,7 @@ int main(void)
     result = mcc172_a_in_scan_read(address, &read_status, samples_per_channel,
         timeout, read_buf, buffer_size, &samples_read_per_channel);
     STOP_ON_ERROR(result);
+
     if (read_status & STATUS_HW_OVERRUN)
     {
         printf("\n\nHardware overrun\n");
@@ -278,9 +281,6 @@ int main(void)
         printf("\n\nBuffer overrun\n");
         goto stop;
     }
-
-    print_error(mcc172_a_in_scan_stop(address));
-    print_error(mcc172_a_in_scan_cleanup(address));
 
     if (samples_read_per_channel >= samples_per_channel)
     {
@@ -315,11 +315,18 @@ int main(void)
         
         fclose(logfile);
 
-        // Interpolate for a more precise peak frequency.
-        peak_offset = quadratic_interpolate(spectrum[peak_index - 1], 
-            spectrum[peak_index], spectrum[peak_index + 1]);
-        peak_freq = (peak_index + peak_offset) * scan_rate / 
-            samples_per_channel;
+        if ((peak_index > 0) && (peak_index < (samples_per_channel/2)))
+        {
+            // Interpolate for a more precise peak frequency.
+            peak_offset = quadratic_interpolate(spectrum[peak_index - 1], 
+                spectrum[peak_index], spectrum[peak_index + 1]);
+            peak_freq = (peak_index + peak_offset) * scan_rate / 
+                samples_per_channel;
+        }
+        else
+        {
+            peak_freq = peak_index * scan_rate / samples_per_channel;
+        }
         printf("Peak: %.1f dBFS at %.1f Hz\n", peak_val, peak_freq);
         
         // Find and display harmonic levels.
