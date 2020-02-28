@@ -1,6 +1,6 @@
 #!/bin/bash
 
-if [ "$(id -u)" != "0" ]; then
+if [ "$(id -u)" == "0" ]; then
    echo "This script must NOT be run as root. It's for uninstalling from a Python virtualenv." 1>&2
    exit 1
 fi
