@@ -3,7 +3,7 @@
 *   Measurement Computing Corp.
 *   This file contains functions used with the MCC 172.
 *
-*   03/18/2019
+*   10/02/2019
 */
 
 #include <stdint.h>
@@ -15,7 +15,6 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <errno.h>
-#include <syslog.h>
 #include <sys/ioctl.h>
 #include <linux/spi/spidev.h>
 #include "daqhats.h"
@@ -25,9 +24,6 @@
 
 // *****************************************************************************
 // Constants
-#define DEBUG
-#define RESET_ACTIVE_LOW
-
 #define MAX_CODE                (8388607L)
 #define MIN_CODE                (-8388608L)
 #define RANGE_MIN               (-5.0)
@@ -70,8 +66,6 @@ struct MCC172DeviceInfo mcc172_device_info =
 #define CMD_AINCLOCKCONFIG_W    0x16
 #define CMD_TRIGGERCONFIG_R     0x17
 #define CMD_TRIGGERCONFIG_W     0x18
-#define CMD_DECIMATEFACTOR_R    0x19
-#define CMD_DECIMATEFACTOR_W    0x1A
 
 #define CMD_BLINK               0x40
 #define CMD_ID                  0x41
@@ -182,9 +176,9 @@ struct mcc172Device
     uint16_t handle_count;      // the number of handles open to this device
     uint16_t fw_version;        // firmware version
     int spi_fd;                 // SPI file descriptor
+    uint8_t reset_polarity;     // Reset signal polarity
     uint8_t trigger_source;     // Trigger source
     uint8_t trigger_mode;       // Trigger mode
-    uint16_t decimate_factor;   // Decimation factor
     struct mcc172FactoryData factory_data;  // Factory data
     struct mcc172ScanThreadInfo* scan_info; // Scan info
     pthread_mutex_t scan_mutex;
@@ -202,10 +196,6 @@ struct mcc172Device
 static struct mcc172Device* _devices[MAX_NUMBER_HATS];
 static bool _mcc172_lib_initialized = false;
 
-#ifdef DEBUG
-static bool log_open = false;
-#endif
-
 static const char* const spi_device = SPI_DEVICE_0; // the spidev device
 static const uint8_t spi_mode = SPI_MODE_1;         // use mode 1 (CPOL=0,
                                                     // CPHA=1)
@@ -217,17 +207,6 @@ static const uint16_t spi_delay = 0;                // delay in us before
 
 // *****************************************************************************
 // Local Functions
-static void _syslog(__attribute__((unused)) char* str)
-{
-#ifdef DEBUG
-    if (!log_open)
-    {
-        openlog("mcc172", LOG_PID|LOG_CONS, LOG_USER);
-        log_open = true;
-    }
-    syslog(LOG_INFO, str);
-#endif
-}
 
 /******************************************************************************
   Validate parameters for an address
@@ -385,9 +364,6 @@ static int _spi_transfer(uint8_t address, uint8_t command, void* tx_data,
     int ret;
     uint8_t temp;
     bool timeout = false;
-#ifdef DEBUG
-    char buffer[80];
-#endif
 
     uint16_t tx_count;
     struct mcc172Device* dev = _devices[address];
@@ -511,10 +487,6 @@ static int _spi_transfer(uint8_t address, uint8_t command, void* tx_data,
             }
             else
             {
-#ifdef DEBUG
-                sprintf(buffer, "ioctl failed %d %d\n", errno, tr.len);
-                _syslog(buffer);
-#endif
                 usleep(300);
             }
 
@@ -866,9 +838,6 @@ static void* _scan_thread(void* arg)
     uint8_t rx_buffer[5];
     bool scan_running;
     int result;
-#ifdef DEBUG
-    char str[80];
-#endif
 
     free(arg);
 
@@ -928,9 +897,6 @@ static void* _scan_thread(void* arg)
 
             if (info->hw_overrun)
             {
-#ifdef DEBUG
-                _syslog("hw overrun");
-#endif
                 done = true;
                 pthread_mutex_lock(&_devices[address]->scan_mutex);
                 info->scan_running = false;
@@ -988,9 +954,6 @@ static void* _scan_thread(void* arg)
 
                         if (info->buffer_depth > info->buffer_size)
                         {
-#ifdef DEBUG
-                            _syslog("buffer overrun");
-#endif
                             pthread_mutex_lock(&_devices[address]->scan_mutex);
                             info->buffer_overrun = true;
                             info->scan_running = false;
@@ -999,13 +962,6 @@ static void* _scan_thread(void* arg)
                             done = true;
                         }
                         info->samples_transferred += read_count;
-                    }
-                    else
-                    {
-#ifdef DEBUG
-                        sprintf(str, "error %d", error);
-                        _syslog(str);
-#endif
                     }
 
                     // adaptive sleep time to minimize processor usage
@@ -1071,7 +1027,6 @@ int mcc172_open(uint8_t address)
     uint16_t custom_size;
     struct mcc172Device* dev;
     uint16_t id_data[3];
-    uint8_t buffer;
 
     _mcc172_lib_init();
 
@@ -1108,43 +1063,6 @@ int mcc172_open(uint8_t address)
             custom_data = NULL;
         }
 
-        // ensure GPIO signals are initialized
-        gpio_dir(IRQ_GPIO, 1);
-
-#ifdef RESET_ACTIVE_LOW
-        // Signal defaults to low, so micro would be held in reset if library
-        // has not been opened since boot.  In that case, add extra delay for
-        // micro to start.
-        if (gpio_status(RESET_GPIO) == 0)
-        {
-            gpio_write(RESET_GPIO, 1);
-            gpio_dir(RESET_GPIO, 0);
-
-            int lock_fd;
-
-            // Obtain a spi lock
-            if ((lock_fd = _obtain_lock()) < 0)
-            {
-                // could not get a lock within 5 seconds, report as a timeout
-                return RESULT_LOCK_TIMEOUT;
-            }
-
-            _set_address(address);
-            _release_lock(lock_fd);
-
-            sleep(2);
-        }
-        else
-        {
-            gpio_write(RESET_GPIO, 1);
-            gpio_dir(RESET_GPIO, 0);
-        }
-#else
-        gpio_write(RESET_GPIO, 0);
-        gpio_dir(RESET_GPIO, 0);
-#endif
-
-
         // create a struct to hold device instance data
         _devices[address] = (struct mcc172Device*)calloc(
             1, sizeof(struct mcc172Device));
@@ -1153,22 +1071,17 @@ int mcc172_open(uint8_t address)
         // initialize the struct elements
         dev->scan_info = NULL;
         dev->handle_count = 1;
-        dev->decimate_factor = 1;
-
-        pthread_mutex_init(&dev->scan_mutex, NULL);
-
-        // open the SPI device handle
-        dev->spi_fd = open(spi_device, O_RDWR);
-        if (dev->spi_fd < 0)
-        {
-            free(custom_data);
-            free(dev);
-            _devices[address] = NULL;
-            return RESULT_RESOURCE_UNAVAIL;
-        }
+        dev->reset_polarity = 1;
 
         if (custom_size > 0)
         {
+            // if the EEPROM is initialized then use the version to determine
+            // which reset polarity was used on the hardware
+            if (info.version == 1)
+            {
+                dev->reset_polarity = 0;
+            }
+
             // convert the JSON custom data to parameters
             cJSON* root = cJSON_Parse(custom_data);
             if (root == NULL)
@@ -1200,6 +1113,58 @@ int mcc172_open(uint8_t address)
                 "values\n", address);
         }
 
+        // ensure GPIO signals are initialized
+        gpio_dir(IRQ_GPIO, 1);
+
+        if (dev->reset_polarity == 0)
+        {
+            // Initial prototypes had active low reset, and the GPIO signal 
+            // defaults to low. This causes the micro to be held in reset if 
+            // the library has not been opened since booting. In that case, add 
+            // an extra delay for the micro to start.
+            if (gpio_status(RESET_GPIO) == 0)
+            {
+                gpio_write(RESET_GPIO, 1);
+                gpio_dir(RESET_GPIO, 0);
+
+                int lock_fd;
+
+                // Obtain a spi lock
+                if ((lock_fd = _obtain_lock()) < 0)
+                {
+                    // could not get a lock within 5 seconds, report as a timeout
+                    return RESULT_LOCK_TIMEOUT;
+                }
+
+                _set_address(address);
+                _release_lock(lock_fd);
+
+                sleep(2);
+            }
+            else
+            {
+                gpio_write(RESET_GPIO, 1);
+                gpio_dir(RESET_GPIO, 0);
+            }
+        }
+        else
+        {
+            // normal reset polarity
+            gpio_write(RESET_GPIO, 0);
+            gpio_dir(RESET_GPIO, 0);
+        }
+
+        pthread_mutex_init(&dev->scan_mutex, NULL);
+
+        // open the SPI device handle
+        dev->spi_fd = open(spi_device, O_RDWR);
+        if (dev->spi_fd < 0)
+        {
+            free(custom_data);
+            free(dev);
+            _devices[address] = NULL;
+            return RESULT_RESOURCE_UNAVAIL;
+        }
     }
     else
     {
@@ -1239,12 +1204,6 @@ int mcc172_open(uint8_t address)
 
     if (ret == RESULT_SUCCESS)
     {
-        // set the decimation factor to the default
-        buffer = 0;
-        ret = _spi_transfer(address, CMD_DECIMATEFACTOR_W, &buffer, 1, NULL, 0,
-            20*MSEC, 0);
-        
-        _syslog("open");
         return RESULT_SUCCESS;
     }
     else
@@ -1291,14 +1250,6 @@ int mcc172_close(uint8_t address)
         free(_devices[address]);
         _devices[address] = NULL;
     }
-
-#ifdef DEBUG
-    if (log_open)
-    {
-        _syslog("close");
-        closelog();
-    }
-#endif
 
     return RESULT_SUCCESS;
 }
@@ -1504,16 +1455,14 @@ int mcc172_iepe_config_read(uint8_t address, uint8_t channel, uint8_t* config)
   Configure the ADC clock
  *****************************************************************************/
 int mcc172_a_in_clock_config_write(uint8_t address, uint8_t clock_source,
-    uint8_t alias_mode, double sample_rate_per_channel)
+    double sample_rate_per_channel)
 {
     double divisor;
-    uint16_t decimate_factor;
     int result;
     uint8_t buffer[2];
 
     if (!_check_addr(address) ||
-        (clock_source > SOURCE_SLAVE) ||
-        (alias_mode > ALIAS_ENHANCED))
+        (clock_source > SOURCE_SLAVE))
     {
         return RESULT_BAD_PARAMETER;
     }
@@ -1529,53 +1478,16 @@ int mcc172_a_in_clock_config_write(uint8_t address, uint8_t clock_source,
         sample_rate_per_channel = 200.0;
     }
     
-    if (alias_mode == ALIAS_NORMAL)
-    {
-        // normal mode - no decimation, use ADC clock to control data rate
-        
-        // set the sample rate to one supported by the device
-        divisor = MAX_SAMPLE_RATE / sample_rate_per_channel + 0.5;
+    // set the sample rate to one supported by the device
+    divisor = MAX_SAMPLE_RATE / sample_rate_per_channel + 0.5;
 
-        if (divisor < 1.0)
-        {
-            divisor = 1.0;
-        }
-        else if (divisor > 256.0)
-        {
-            divisor = 256.0;
-        }
-        
-        decimate_factor = 1;
+    if (divisor < 1.0)
+    {
+        divisor = 1.0;
     }
-    else
+    else if (divisor > 256.0)
     {
-        // enhanced mode - keep ADC clock high for enhanced alias rejection and
-        // control data rate with decimation factor
-        
-        if (sample_rate_per_channel > 800.0)
-        {
-            divisor = 1;
-        }
-        else if (sample_rate_per_channel > 400.0)
-        {
-            divisor = 2;
-        }
-        else
-        {
-            divisor = 4;
-        }
-        
-        decimate_factor = (MAX_SAMPLE_RATE / divisor) / 
-            sample_rate_per_channel + 0.5;
-
-        if (decimate_factor < 1.0)
-        {
-            decimate_factor = 1.0;
-        }
-        else if (decimate_factor > 256.0)
-        {
-            decimate_factor = 256.0;
-        }
+        divisor = 256.0;
     }
 
     // write the clock configuration to the device
@@ -1583,16 +1495,6 @@ int mcc172_a_in_clock_config_write(uint8_t address, uint8_t clock_source,
     buffer[1] = (uint8_t)(divisor - 1);
     result = _spi_transfer(address, CMD_AINCLOCKCONFIG_W, buffer, 2, NULL, 0,
         20*MSEC, 10);
-    if (result != RESULT_SUCCESS)
-    {
-        return result;
-    }
-    
-    // Write the decimate factor
-    buffer[0] = (uint8_t)(decimate_factor-1);
-    _devices[address]->decimate_factor = decimate_factor;
-    result = _spi_transfer(address, CMD_DECIMATEFACTOR_W, buffer, 1, NULL, 0,
-        20*MSEC, 0);
 
     return result;
 }
@@ -1601,16 +1503,14 @@ int mcc172_a_in_clock_config_write(uint8_t address, uint8_t clock_source,
   Read the ADC clock configuration.
  *****************************************************************************/
 int mcc172_a_in_clock_config_read(uint8_t address, uint8_t* clock_source,
-    uint8_t* alias_mode, double* sample_rate, uint8_t* synced)
+    double* sample_rate, uint8_t* synced)
 {
     int result;
     uint16_t clock_divider;
-    uint16_t decimate_factor;
     uint8_t buffer[2];
 
     if (!_check_addr(address) ||
         (clock_source == NULL) ||
-        (alias_mode == NULL) ||
         (sample_rate == NULL) ||
         (synced == NULL))
     {
@@ -1629,16 +1529,7 @@ int mcc172_a_in_clock_config_read(uint8_t address, uint8_t* clock_source,
     *synced = (buffer[0] >> 7) & 0x01;
     clock_divider = (uint16_t)buffer[1] + 1;
 
-    // read the decimation factor
-    result = _spi_transfer(address, CMD_DECIMATEFACTOR_R, NULL, 0, buffer, 1,
-        20*MSEC, 10);
-    if (result != RESULT_SUCCESS)
-    {
-        return result;
-    }
-    decimate_factor = (uint16_t)buffer[0] + 1;
-    
-    *sample_rate = (MAX_SAMPLE_RATE / clock_divider) / decimate_factor;
+    *sample_rate = (MAX_SAMPLE_RATE / clock_divider);
 
     return RESULT_SUCCESS;
 }
@@ -1684,7 +1575,6 @@ int mcc172_a_in_scan_start(uint8_t address, uint8_t channel_mask,
     int result;
     uint8_t num_channels;
     uint8_t channel;
-    uint8_t alias_mode;
     double sample_rate_per_channel;
     struct mcc172Device* dev;
     struct mcc172ScanThreadInfo* info;
@@ -1696,6 +1586,7 @@ int mcc172_a_in_scan_start(uint8_t address, uint8_t channel_mask,
     if (!_check_addr(address) ||
         (channel_mask == 0) ||
         (channel_mask >= (1 << NUM_CHANNELS)) ||
+        (options & OPTS_EXTCLOCK) ||
         ((samples_per_channel == 0) && ((options & OPTS_CONTINUOUS) == 0)))
     {
         return RESULT_BAD_PARAMETER;
@@ -1741,7 +1632,7 @@ int mcc172_a_in_scan_start(uint8_t address, uint8_t channel_mask,
     do
     {
         result = mcc172_a_in_clock_config_read(address, &clock_source,
-            &alias_mode, &sample_rate_per_channel, &synced);
+            &sample_rate_per_channel, &synced);
         if (result != RESULT_SUCCESS)
         {
             free(info);
@@ -1953,7 +1844,7 @@ int mcc172_a_in_scan_status(uint8_t address, uint16_t* status,
 {
     struct mcc172ScanThreadInfo* info;
     uint16_t stat;
-    uint16_t buffer_depth;
+    uint32_t buffer_depth;
     bool hw_overrun;
     bool buffer_overrun;
     bool triggered;
@@ -2035,7 +1926,7 @@ int mcc172_a_in_scan_read(uint8_t address, uint16_t* status,
     struct timespec start_time;
     struct timespec current_time;
     uint16_t stat;
-    uint16_t buffer_depth;
+    uint32_t buffer_depth;
     bool hw_overrun;
     bool buffer_overrun;
     bool triggered;
@@ -2399,16 +2290,6 @@ int mcc172_open_for_update(uint8_t address)
             custom_data = NULL;
         }
 
-        // ensure GPIO signals are initialized
-#ifdef RESET_ACTIVE_LOW
-        gpio_write(RESET_GPIO, 1);
-#else
-        gpio_write(RESET_GPIO, 0);
-#endif
-        gpio_dir(RESET_GPIO, 0);
-
-        gpio_dir(IRQ_GPIO, 1);
-
         // create a struct to hold device instance data
         _devices[address] = (struct mcc172Device*)calloc(
             1, sizeof(struct mcc172Device));
@@ -2417,19 +2298,17 @@ int mcc172_open_for_update(uint8_t address)
         // initialize the struct elements
         dev->scan_info = NULL;
         dev->handle_count = 1;
-
-        // open the SPI device handle
-        dev->spi_fd = open(spi_device, O_RDWR);
-        if (dev->spi_fd < 0)
-        {
-            free(custom_data);
-            free(dev);
-            _devices[address] = NULL;
-            return RESULT_RESOURCE_UNAVAIL;
-        }
+        dev->reset_polarity = 1;
 
         if (custom_size > 0)
         {
+            // if the EEPROM is initialized then use the version to determine
+            // which reset polarity was used on the hardware
+            if (info.version == 1)
+            {
+                dev->reset_polarity = 0;
+            }
+
             // convert the JSON custom data to parameters
             cJSON* root = cJSON_Parse(custom_data);
             if (!_parse_factory_data(root, &dev->factory_data))
@@ -2447,6 +2326,29 @@ int mcc172_open_for_update(uint8_t address)
             _set_defaults(&dev->factory_data);
         }
 
+        
+        // ensure GPIO signals are initialized
+        if (dev->reset_polarity == 0)
+        {
+            gpio_write(RESET_GPIO, 1);
+        }
+        else
+        {
+            gpio_write(RESET_GPIO, 0);
+        }
+        gpio_dir(RESET_GPIO, 0);
+
+        gpio_dir(IRQ_GPIO, 1);
+
+        // open the SPI device handle
+        dev->spi_fd = open(spi_device, O_RDWR);
+        if (dev->spi_fd < 0)
+        {
+            free(custom_data);
+            free(dev);
+            _devices[address] = NULL;
+            return RESULT_RESOURCE_UNAVAIL;
+        }
     }
     else
     {
@@ -2456,7 +2358,6 @@ int mcc172_open_for_update(uint8_t address)
         dev->handle_count++;
     }
 
-    _syslog("open");
     return RESULT_SUCCESS;
 }
 
@@ -2464,12 +2365,15 @@ int mcc172_enter_bootloader(uint8_t address)
 {
     int lock_fd;
     int count;
+    struct mcc172Device* dev;
 
     if (!_check_addr(address))                  // check address failed
     {
         return RESULT_BAD_PARAMETER;
     }
 
+    dev = _devices[address];
+    
     // Obtain a spi lock
     if ((lock_fd = _obtain_lock()) < 0)
     {
@@ -2483,15 +2387,18 @@ int mcc172_enter_bootloader(uint8_t address)
     count = 0;
     while (gpio_status(IRQ_GPIO) && (count < 20))
     {
-#ifdef RESET_ACTIVE_LOW
-        gpio_write(RESET_GPIO, 0);
-        usleep(2*1000ul);
-        gpio_write(RESET_GPIO, 1);
-#else
-        gpio_write(RESET_GPIO, 1);
-        usleep(2*1000ul);
-        gpio_write(RESET_GPIO, 0);
-#endif
+        if (dev->reset_polarity == 0)
+        {
+            gpio_write(RESET_GPIO, 0);
+            usleep(2*1000ul);
+            gpio_write(RESET_GPIO, 1);
+        }
+        else
+        {
+            gpio_write(RESET_GPIO, 1);
+            usleep(2*1000ul);
+            gpio_write(RESET_GPIO, 0);
+        }
         usleep(55*1000ul);
         count++;
     }
@@ -2509,7 +2416,6 @@ int mcc172_enter_bootloader(uint8_t address)
 
         if (gpio_status(IRQ_GPIO))
         {
-            _syslog("Error: NCHG never went low\n");
             _release_lock(lock_fd);
             return RESULT_TIMEOUT;
         }
