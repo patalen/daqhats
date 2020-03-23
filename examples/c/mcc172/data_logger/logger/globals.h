@@ -13,7 +13,8 @@
 
 
 #include <gtk/gtk.h>
-#include "gtkdatabox.h"
+#include <gtkdatabox.h>
+#include <gtkdatabox_util.h>
 #include <glib.h>
 
 #include "daqhats/daqhats.h"
@@ -44,7 +45,7 @@ EXTERN GtkWidget *fftTable;
 
 EXTERN GtkWidget *rbContinuous, *rbFinite;
 EXTERN GtkWidget *spinRate;
-EXTERN GtkWidget *spinNumSamples;
+EXTERN GtkWidget *comboBoxFftSize;
 EXTERN GtkWidget *btnSelectLogFile;
 EXTERN GtkWidget *btnQuit;
 EXTERN GtkWidget *chkChan[MAX_172_CHANNELS];
@@ -57,10 +58,10 @@ EXTERN GdkRGBA legendColor[MAX_172_CHANNELS];
 EXTERN uint8_t address;
 EXTERN uint8_t channel_mask;
 
-EXTERN double scan_timeout;
 EXTERN gboolean done;
+EXTERN gboolean continuous;
 
-EXTERN int iNumSamplesPerChannel;
+EXTERN int iFftSize;
 EXTERN double iRatePerChannel;
 
 EXTERN pthread_t threadh;
@@ -72,14 +73,11 @@ EXTERN char csv_filename[512];
 EXTERN GMutex data_mutex;
 EXTERN GMainContext *context;
 
+EXTERN pthread_mutex_t graph_init_mutex;
+EXTERN pthread_cond_t graph_init_cond;
+
 EXTERN int error_code;
 EXTERN char error_message[256];
-////////EXTERN GMainContext *error_context;
-
-////////EXTERN  kiss_fftr_cfg cfg;
-////////EXTERN  kiss_fft_scalar* in;
-////////EXTERN  kiss_fft_cpx* out;
-
 
 EXTERN char dbg_string[1000];
 EXTERN char dbg_string0[1000];
